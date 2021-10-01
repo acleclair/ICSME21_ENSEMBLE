@@ -12,23 +12,17 @@ import h5py
 import random
 import tensorflow as tf
 import numpy as np
-from tensorflow.keras.layers import Input, Dense, Multiply, multiply, Softmax, Embedding, Reshape, GRU, LSTM, Dropout, BatchNormalization, Activation, concatenate
-from tensorflow.keras.layers import Flatten, Bidirectional, RepeatVector, Permute, TimeDistributed, dot, Attention
-from tensorflow.keras.models import Model
 
-from custom.graphlayers import GCNLayer
-from custom.transformer_layers import TokenAndPositionEmbedding, TransformerBlock
+
 import tensorflow.keras as keras
 import tensorflow.keras.utils
 from tensorflow.keras.callbacks import ModelCheckpoint, LambdaCallback, Callback
 import tensorflow.keras.backend as K
 from model import create_model
-from myutils import prep, drop, batch_gen, seq2sent
+from myutils_og import prep, drop, batch_gen, seq2sent
 from nltk.translate.bleu_score import corpus_bleu, sentence_bleu
-from keras.utils.vis_utils import plot_model
-import tokenizer
 
-#tf.compat.v1.disable_eager_execution()
+import tokenizer
 
 class HistoryCallback(Callback):
     
@@ -70,29 +64,16 @@ class HistoryCallback(Callback):
         for k, v in logs.items():
             self.history.setdefault(k, []).append(v)
 
-class comb_gen(tensorflow.keras.utils.Sequence):
-    def __init__(self, gen1, gen2):
-        self.g1 = gen1
-        self.g2 = gen2
-
-    def __getitem__(self, idx):
-        o1 = self.g1[idx]
-        o2 = self.g2[idx]
-        return ((o1[0], o2[0]), o1[1])
-
-    def __len__(self):
-        return int(np.ceil(np.array(self.g1.seqdata['dt%s' % (self.g1.tt)]).shape[0])/self.g1.batch_size)
 
 if __name__ == '__main__':
 
     timestart = int(round(time.time()))
 
     parser = argparse.ArgumentParser(description='')
-    parser.add_argument('modelfile1', type=str, default=None)
-    parser.add_argument('modelfile2', type=str, default=None)
     parser.add_argument('--gpu', type=str, help='0 or 1', default='0')
     parser.add_argument('--batch-size', dest='batch_size', type=int, default=200)
     parser.add_argument('--epochs', dest='epochs', type=int, default=10)
+    parser.add_argument('--model-type', dest='modeltype', type=str, default='vanilla')
     parser.add_argument('--with-graph', dest='withgraph', action='store_true', default=False)
     parser.add_argument('--with-calls', dest='withcalls', action='store_true', default=False)
     parser.add_argument('--vmem-limit', dest='vmemlimit', type=int, default=0)
@@ -111,14 +92,13 @@ if __name__ == '__main__':
     gpu = args.gpu
     batch_size = args.batch_size
     epochs = args.epochs
+    modeltype = args.modeltype
     withgraph = args.withgraph
     withcalls = args.withcalls
     vmemlimit = args.vmemlimit
     onlyprintsummary = args.onlyprintsummary
     seed = args.seed
     bagging = args.bagging
-    modelfile1 = args.modelfile1
-    modelfile2 = args.modelfile2
     #datfile = args.datfile
 
     random.seed(seed)
@@ -204,77 +184,49 @@ if __name__ == '__main__':
     print('vaidation data size {}'.format(valsteps*100))
     print('------------------------------------------')
 
-    prep('loading config... ')
-    tmp1 = modelfile1.split('/')
-    tmp2 = modelfile2.split('/')
-    outdir1 = '/'.join(tmp1[:-1])
-    outdir2 = '/'.join(tmp2[:-1])
-    modeltype1 = tmp1[-1]
-    modeltype2 = tmp2[-1]
-    (modeltype1, mid1, timestart1) = modeltype1.split('_')
-    (modeltype2, mid2, timestart2) = modeltype2.split("_")
-    (timestart1, ext1) = timestart1.split('.')
-    (timestart2, ext2) = timestart2.split('.')
-   # modeltype = modeltype.split('/')[-1]
-   # modeltype2 = modeltype2.split('/')[-1]
-    config1 = pickle.load(open(outdir1+'/'+modeltype1+'_conf_'+timestart1+'.pkl', 'rb'))
-    config2 = pickle.load(open(outdir2+'/'+modeltype2+'_conf_'+timestart2+'.pkl', 'rb'))
+    config = dict()
+    config['seed'] = seed
+    config['bagging'] = bagging
+    config['tdatvocabsize'] = tdatvocabsize
+    config['comvocabsize'] = comvocabsize
+    config['smlvocabsize'] = smlvocabsize
+
+    try:
+        config['fidloc'] = extradata['fidloc']
+        config['locfid'] = extradata['locfid']
+        config['comlen'] = int(np.array(seqdata.get('/ctrain')).shape[1])
+        config['tdatlen'] = int(np.array(seqdata.get('/dttrain')).shape[1])
+        config['sdatlen'] = extradata['config']['sdatlen']
+        config['smllen'] = int(np.array(seqdata.get('/strain')).shape[1])
+    except KeyError:
+        pass # some configurations do not have all data, which is fine
+
+    config['batch_size'] = batch_size
 
 
-    config1['bagging'] = False
-    config2['bagging'] = False
-    #comlen = config['comlen']
-    #fid2loc = config['fidloc']['c'+testval] # fid2loc[fid] = loc
-    #loc2fid = config['locfid']['c'+testval] # loc2fid[loc] = fid
-    #allfids = list(fid2loc.keys())
-    #allfidlocs = list(loc2fid.keys())
 
+
+
+            
+
+
+    prep('creating model... ')
+    config, model = create_model(modeltype, config)
     drop()
 
-    prep('loading model... ')
-    model1 = keras.models.load_model(modelfile1, custom_objects={"tf":tf, "keras":keras, "GCNLayer":GCNLayer, 'TokenAndPositionEmbedding': TokenAndPositionEmbedding, 'TransformerBlock':TransformerBlock})
-    #print(model.summary())
-    model2 = keras.models.load_model(modelfile2, custom_objects={"tf":tf, "keras":keras, "GCNLayer":GCNLayer, 'TokenAndPositionEmbedding': TokenAndPositionEmbedding, 'TransformerBlock':TransformerBlock})
-    #print(model2.summary())
-    drop()
-
-    for l in model1.layers:
-        l._name = l.name+'_mdl1'
-        l.trainable = False
-
-    for l in model2.layers:
-        l._name = l.name+'_mdl2'
-        l.trainable = False
-        print(l, l.trainable)
-
-################################################
-    # out = Attention()([model1.get_layer('time_distributed_mdl1').output, model2.get_layer('time_distributed_mdl2').output])
-    # out = Flatten()(out)
-    # out = Dense(100, activation='tanh')(out)
-
-#################################################
-
-    out = concatenate([model1.output, model2.output])
-    out = Dense(100, activation='tanh')(out)
-    out = Dense(config1['comvocabsize'], activation='softmax')(out)
-    mdl = Model(inputs=[model1.input, model2.input], outputs=out)
-    mdl.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
-    print(mdl.summary())
-    plot_model(mdl, to_file='model1.png', show_shapes=True, show_layer_names=True)
-    #exit()
-    gen = batch_gen(seqdata, extradata, 'train', config1, config2)
-
-    #gen2 = batch_gen(seqdata, extradata, 'train', config2)
-    #cg = comb_gen(gen1, gen2)
-    #checkpoint = ModelCheckpoint(outdir+'/'+modeltype+'_E{epoch:02d}_TA{acc:.2f}_VA{val_acc:.2f}_VB{val_bleu:}.h5', monitor='val_loss')
-    checkpoint = ModelCheckpoint(outdir+'/models/'+modeltype1+'_'+modeltype2+'_E{epoch:02d}_'+str(timestart)+'.h5')
-    savehist = HistoryCallback()
-    savehist.setCatchExit(outdir, modeltype1+'_ens', timestart, config1)
-    savehist.setCatchExit(outdir, modeltype2+'_ens', timestart, config2)
+    print(model.summary())
     
-    valgen = batch_gen(seqdata, extradata, 'val', config1, config2)
-    #valgen2 = batch_gen(seqdata, extradata, 'val', config2)
-    #vg = comb_gen(valgen1, valgen2)
+    if onlyprintsummary:
+        sys.exit()
+
+    gen = batch_gen(seqdata, extradata, 'train', config)
+    #checkpoint = ModelCheckpoint(outdir+'/'+modeltype+'_E{epoch:02d}_TA{acc:.2f}_VA{val_acc:.2f}_VB{val_bleu:}.h5', monitor='val_loss')
+    checkpoint = ModelCheckpoint(outdir+'/models/'+modeltype+'_E{epoch:02d}_'+str(timestart)+'.h5')
+    savehist = HistoryCallback()
+    savehist.setCatchExit(outdir, modeltype, timestart, config)
+    
+    valgen = batch_gen(seqdata, extradata, 'val', config)
+
     # If you want it to calculate BLEU Score after each epoch use callback_valgen and test_cb
     #####
     #callback_valgen = batch_gen_train_bleu(seqdata, comvocabsize, 'val', modeltype, batch_size=batch_size)
@@ -283,7 +235,7 @@ if __name__ == '__main__':
     callbacks = [ checkpoint, savehist ]
 
     try:
-        history = mdl.fit(x=gen, steps_per_epoch=steps, epochs=epochs, validation_data=valgen, validation_steps=valsteps, verbose=1, max_queue_size=200, workers=20, callbacks=callbacks)#, validation_data=valgen, validation_steps=valsteps
+        history = model.fit(x=gen, steps_per_epoch=steps, epochs=epochs, verbose=1, max_queue_size=8, workers=4, use_multiprocessing=False, callbacks=callbacks)#, validation_data=valgen, validation_steps=valsteps
     except Exception as ex:
         print(ex)
         traceback.print_exc(file=sys.stdout)
